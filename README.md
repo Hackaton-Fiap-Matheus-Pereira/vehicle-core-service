@@ -192,5 +192,8 @@ assume `vehicle-core`. Sem essa variável, CI, testes e publicação no GHCR con
 e apenas o job de deploy é ignorado.
 
 Na distribuição completa, este repositório também recebe `docker-compose.yml`, `infra/`,
+
+## Entrega acadêmica
+Projeto desenvolvido para o Tech Challenge da Pós-Tech.
 `docs/` e `scripts/`, que concentram Compose, Kind, Kubernetes, Terraform e o roteiro E2E.
 O código de vendas continua em repositório separado, como exige o enunciado.

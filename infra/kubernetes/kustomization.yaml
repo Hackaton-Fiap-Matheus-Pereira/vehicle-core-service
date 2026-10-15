@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespaces.yaml
+  - 02-configmaps.yaml
+  - 10-core-mysql.yaml
+  - 11-sales-mysql.yaml
+  - 20-core-migration-job.yaml
+  - 21-sales-migration-job.yaml
+  - 30-core-deployment.yaml
+  - 31-sales-deployment.yaml
+  - 40-services.yaml
+  - 45-network-policies.yaml
+  - 50-sales-hpa.yaml
+

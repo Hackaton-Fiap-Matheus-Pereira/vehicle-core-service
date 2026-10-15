@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vehicle-core-config
+  namespace: vehicle-core
+  labels:
+    app.kubernetes.io/part-of: tech-challenge-fase-4
+data:
+  APP_ENV: production
+  LOG_LEVEL: INFO
+  JWT_ALGORITHM: HS256
+  JWT_EXPIRE_MINUTES: "30"
+  SALES_SERVICE_URL: http://vehicle-sales-service.vehicle-sales.svc.cluster.local:8000
+  SALES_SERVICE_TIMEOUT_SECONDS: "5"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vehicle-sales-config
+  namespace: vehicle-sales
+  labels:
+    app.kubernetes.io/part-of: tech-challenge-fase-4
+data:
+  ENVIRONMENT: production
+  LOG_LEVEL: INFO
+  CORE_BASE_URL: http://vehicle-core-service.vehicle-core.svc.cluster.local:8000
+  CORE_REQUEST_TIMEOUT_SECONDS: "5"
+

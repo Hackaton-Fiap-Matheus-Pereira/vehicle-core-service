@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vehicle-sales-migration
+  namespace: vehicle-sales
+  labels:
+    app.kubernetes.io/name: vehicle-sales-service
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vehicle-sales-service
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/SEU_USUARIO/vehicle-sales-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: vehicle-sales-config
+            - secretRef:
+                name: vehicle-sales-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+

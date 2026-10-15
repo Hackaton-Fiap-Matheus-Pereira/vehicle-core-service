@@ -1,0 +1,165 @@
+name: tech-challenge-fase-4
+
+services:
+  core-db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${CORE_DB_NAME:?Defina CORE_DB_NAME no arquivo .env}
+      MYSQL_USER: ${CORE_DB_USER:?Defina CORE_DB_USER no arquivo .env}
+      MYSQL_PASSWORD: ${CORE_DB_PASSWORD:?Defina CORE_DB_PASSWORD no arquivo .env}
+      MYSQL_ROOT_PASSWORD: ${CORE_DB_ROOT_PASSWORD:?Defina CORE_DB_ROOT_PASSWORD no arquivo .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - core_mysql_data:/var/lib/mysql
+    networks:
+      - core-data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  sales-db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${SALES_DB_NAME:?Defina SALES_DB_NAME no arquivo .env}
+      MYSQL_USER: ${SALES_DB_USER:?Defina SALES_DB_USER no arquivo .env}
+      MYSQL_PASSWORD: ${SALES_DB_PASSWORD:?Defina SALES_DB_PASSWORD no arquivo .env}
+      MYSQL_ROOT_PASSWORD: ${SALES_DB_ROOT_PASSWORD:?Defina SALES_DB_ROOT_PASSWORD no arquivo .env}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - sales_mysql_data:/var/lib/mysql
+    networks:
+      - sales-data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  core-migrations:
+    build:
+      context: .
+    restart: "no"
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    environment:
+      DATABASE_URL: mysql+aiomysql://${CORE_DB_USER}:${CORE_DB_PASSWORD}@core-db:3306/${CORE_DB_NAME}
+    depends_on:
+      core-db:
+        condition: service_healthy
+    networks:
+      - core-data
+
+  sales-migrations:
+    build:
+      context: ../vehicle-sales-service
+    restart: "no"
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    environment:
+      DATABASE_URL: mysql+aiomysql://${SALES_DB_USER}:${SALES_DB_PASSWORD}@sales-db:3306/${SALES_DB_NAME}
+    depends_on:
+      sales-db:
+        condition: service_healthy
+    networks:
+      - sales-data
+
+  vehicle-core-service:
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: mysql+aiomysql://${CORE_DB_USER}:${CORE_DB_PASSWORD}@core-db:3306/${CORE_DB_NAME}
+      JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET no arquivo .env}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-30}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?Defina SERVICE_TOKEN no arquivo .env}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Defina WEBHOOK_SECRET no arquivo .env}
+      SALES_SERVICE_URL: http://vehicle-sales-service:8000
+      SALES_SERVICE_TIMEOUT_SECONDS: "5"
+    entrypoint: ["uvicorn"]
+    command: ["app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${CORE_HOST_PORT:-8000}:8000"
+    depends_on:
+      core-migrations:
+        condition: service_completed_successfully
+      sales-migrations:
+        condition: service_completed_successfully
+    networks:
+      - integration
+      - core-data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  vehicle-sales-service:
+    build:
+      context: ../vehicle-sales-service
+    init: true
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: mysql+aiomysql://${SALES_DB_USER}:${SALES_DB_PASSWORD}@sales-db:3306/${SALES_DB_NAME}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?Defina SERVICE_TOKEN no arquivo .env}
+      CORE_BASE_URL: http://vehicle-core-service:8000
+      CORE_REQUEST_TIMEOUT_SECONDS: "5"
+    entrypoint: ["uvicorn"]
+    command: ["app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${SALES_HOST_PORT:-8001}:8000"
+    depends_on:
+      sales-migrations:
+        condition: service_completed_successfully
+    networks:
+      - integration
+      - sales-data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  core_mysql_data:
+  sales_mysql_data:
+
+networks:
+  integration:
+    driver: bridge
+  core-data:
+    driver: bridge
+    internal: true
+  sales-data:
+    driver: bridge
+    internal: true
+

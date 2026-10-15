@@ -1,0 +1,15 @@
+# Exemplo sem segredos reais. Copie para terraform.tfvars e substitua tudo.
+kube_context = "kind-tech-challenge"
+
+core_image  = "ghcr.io/SEU_USUARIO/vehicle-core-service:latest"
+sales_image = "ghcr.io/SEU_USUARIO/vehicle-sales-service:latest"
+
+core_db_password       = "CHANGE_ME_CORE_DB_PASSWORD"
+core_db_root_password  = "CHANGE_ME_CORE_DB_ROOT_PASSWORD"
+sales_db_password      = "CHANGE_ME_SALES_DB_PASSWORD"
+sales_db_root_password = "CHANGE_ME_SALES_DB_ROOT_PASSWORD"
+
+jwt_secret     = "CHANGE_ME_WITH_AT_LEAST_32_RANDOM_CHARACTERS"
+service_token  = "CHANGE_ME_SHARED_INTERNAL_SERVICE_TOKEN"
+webhook_secret = "CHANGE_ME_EXTERNAL_WEBHOOK_SECRET"
+

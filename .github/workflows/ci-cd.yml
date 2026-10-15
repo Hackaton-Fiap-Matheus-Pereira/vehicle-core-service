@@ -1,0 +1,173 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vehicle-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Ruff e testes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: python -m pip install --upgrade pip ".[dev]"
+
+      - name: Executar Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Executar testes com cobertura
+        run: pytest --cov-report=term-missing --cov-report=xml
+
+  image:
+    name: Publicar imagem no GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Autenticar no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Definir referência da imagem
+        id: image
+        shell: bash
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "image=$repository:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Construir e publicar
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image }}
+            ${{ steps.image.outputs.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy com kubectl
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_K8S_DEPLOY == 'true'
+    needs: image
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      KUBE_NAMESPACE: ${{ vars.KUBE_NAMESPACE || 'vehicle-core' }}
+    steps:
+      - name: Instalar kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configurar acesso ao cluster
+        shell: bash
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kube"
+          printf '%s' "$KUBE_CONFIG_B64" | base64 --decode > "$RUNNER_TEMP/kube/config"
+          chmod 600 "$RUNNER_TEMP/kube/config"
+
+      - name: Executar migrations
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kube/config
+          IMAGE: ${{ needs.image.outputs.image }}
+        shell: bash
+        run: |
+          migration_job="vehicle-core-migration-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${migration_job}
+            namespace: ${KUBE_NAMESPACE}
+            labels:
+              app.kubernetes.io/name: vehicle-core-service
+              app.kubernetes.io/component: migration
+          spec:
+            backoffLimit: 2
+            activeDeadlineSeconds: 180
+            ttlSecondsAfterFinished: 300
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: vehicle-core-service
+                  app.kubernetes.io/component: migration
+              spec:
+                restartPolicy: Never
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  runAsGroup: 10001
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: migration
+                    image: ${IMAGE}
+                    command: ["alembic", "upgrade", "head"]
+                    envFrom:
+                      - configMapRef:
+                          name: vehicle-core-config
+                      - secretRef:
+                          name: vehicle-core-secrets
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        drop: ["ALL"]
+          EOF
+          if ! kubectl -n "$KUBE_NAMESPACE" wait \
+            --for=condition=complete "job/${migration_job}" --timeout=180s; then
+            kubectl -n "$KUBE_NAMESPACE" logs "job/${migration_job}" --all-containers=true
+            exit 1
+          fi
+          kubectl -n "$KUBE_NAMESPACE" logs "job/${migration_job}" --all-containers=true
+
+      - name: Atualizar deployment e aguardar rollout
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kube/config
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: |
+          kubectl -n "$KUBE_NAMESPACE" set image \
+            deployment/vehicle-core-service \
+            api="$IMAGE"
+          kubectl -n "$KUBE_NAMESPACE" rollout status \
+            deployment/vehicle-core-service \
+            --timeout=180s
+

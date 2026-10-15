@@ -1,196 +1,487 @@
 # Vehicle Core Service
 
-Serviço principal do Tech Challenge SOAT - Fase 4. Ele mantém o cadastro canônico dos
-veículos, autentica usuários e recebe o webhook externo de pagamento. As operações de compra
-e as listagens de veículos disponíveis ou vendidos pertencem exclusivamente ao serviço de
-vendas, que mantém seu próprio banco.
+[![CI/CD](https://github.com/Hackaton-Fiap-Matheus-Pereira/vehicle-core-service/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/Hackaton-Fiap-Matheus-Pereira/vehicle-core-service/actions/workflows/ci-cd.yml)
 
-## Responsabilidades
+Serviço principal da plataforma de revenda de veículos desenvolvida para o **Tech Challenge SOAT - Fase 4**.
 
-- Cadastro, consulta individual e edição dos dados canônicos do veículo.
-- Autenticação JSON com JWT e senhas protegidas por Argon2id.
-- Sincronização HTTP da projeção do veículo com o serviço de vendas.
-- Registro explícito do estado da sincronização (`PENDING`, `SYNCED` ou `FAILED`) e retry
-  autenticado.
-- Recepção do webhook de pagamento, protegido por segredo, e encaminhamento ao serviço de
-  vendas.
-- Recepção, pelo canal interno, de mudanças de estado do veículo feitas pelo serviço de vendas.
-- Health checks de liveness e readiness.
+O Core mantém o cadastro canônico dos veículos, registra usuários, autentica com JWT e recebe o webhook externo de pagamento. As listagens e compras pertencem ao [Vehicle Sales Service](https://github.com/Hackaton-Fiap-Matheus-Pereira/vehicle-sales-service), que possui banco de dados próprio.
 
-O core não expõe `GET /api/v1/vehicles` como coleção. As listagens ordenadas por preço são
-responsabilidade do serviço de vendas, conforme a separação exigida no desafio.
+## 🎯 Objetivo da solução
 
-## Tecnologias
+Disponibilizar o núcleo administrativo e de identidade de uma plataforma de venda de veículos, mantendo os domínios Core e Sales desacoplados por APIs HTTP.
 
-Python 3.12, FastAPI, Pydantic v2, pydantic-settings, SQLAlchemy 2 assíncrono, `aiomysql`,
-MySQL 8.4, Alembic, PyJWT, Argon2, HTTPX, Pytest, Ruff e Docker.
+O fluxo principal contempla:
 
-## Modelo canônico
+1. cadastro prévio do usuário;
+2. autenticação e emissão de JWT;
+3. cadastro e edição de veículos;
+4. sincronização do catálogo com o serviço de vendas;
+5. criação da compra no Sales;
+6. recebimento do webhook de pagamento;
+7. atualização dos estados `AVAILABLE`, `RESERVED` e `SOLD`.
 
-O veículo contém `id`, `brand`, `model`, `year`, `color`, `price`, `status`, `sync_status`,
-`source_version`, usuário criador e timestamps. Os estados de negócio são:
+## ✅ Requisitos atendidos
 
-- `AVAILABLE`: disponível para compra.
-- `RESERVED`: reservado enquanto o pagamento é processado.
-- `SOLD`: venda concluída.
+| Requisito | Implementação |
+|---|---|
+| Cadastrar usuário | `POST /api/v1/auth/register` |
+| Autenticar usuário | `POST /api/v1/auth/login`, com emissão de JWT |
+| Cadastrar veículo | `POST /api/v1/vehicles` |
+| Editar veículo | `PATCH /api/v1/vehicles/{vehicle_id}` |
+| Consultar veículo | `GET /api/v1/vehicles/{vehicle_id}` |
+| Receber confirmação de pagamento | `POST /api/v1/payments/webhook` |
+| Proteger credenciais | Argon2id, JWT e segredos em variáveis de ambiente |
+| Separar os dados por domínio | Banco MySQL exclusivo do Core |
+| Integrar microsserviços | HTTP com `X-Service-Token` e projeção versionada |
+| Automatizar qualidade e entrega | Ruff, Pytest, GitHub Actions, GHCR e deploy Kubernetes opcional |
 
-`source_version` começa em 1 e aumenta a cada alteração canônica. O serviço de vendas pode
-descartar projeções antigas de forma determinística.
+## 🏗️ Arquitetura da solução
 
-## Contratos HTTP
+```mermaid
+flowchart LR
+    C[Cliente / Front-end]
+    P[Provedor de pagamento]
+    CORE[Vehicle Core Service<br/>FastAPI - porta 8000]
+    SALES[Vehicle Sales Service<br/>FastAPI - porta 8001]
+    CDB[(MySQL 8.4<br/>vehicle_core)]
+    SDB[(MySQL 8.4<br/>vehicle_sales)]
 
-### API pública
-
-| Método | Caminho | Proteção | Descrição |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/auth/register` | Pública | Cria usuário a partir de JSON. |
-| `POST` | `/api/v1/auth/login` | Pública | Retorna JWT bearer. |
-| `POST` | `/api/v1/vehicles` | JWT | Cadastra veículo e tenta sincronizar a projeção. |
-| `GET` | `/api/v1/vehicles/{id}` | JWT | Consulta canônica individual. |
-| `PATCH` | `/api/v1/vehicles/{id}` | JWT | Edita marca, modelo, ano, cor e/ou preço. |
-| `POST` | `/api/v1/vehicles/{id}/sync/retry` | JWT | Repete uma sincronização pendente/falha. |
-| `POST` | `/api/v1/payments/webhook` | `X-Webhook-Secret` | Encaminha evento ao sales. |
-| `GET` | `/health/live` | Pública | Verifica o processo. |
-| `GET` | `/health/ready` | Pública | Verifica a conexão com o banco. |
-
-O webhook aceita exatamente:
-
-```json
-{
-  "event_id": "c1038244-a36e-4a86-af81-aad5c55b1d06",
-  "payment_code": "PAY-123",
-  "status": "PAID",
-  "occurred_at": "2026-10-15T12:00:00Z"
-}
+    C -->|Cadastro, login e veículos| CORE
+    C -->|Catálogo e compra| SALES
+    P -->|Webhook| CORE
+    CORE -->|Projeção e pagamento| SALES
+    SALES -->|Atualização de status| CORE
+    CORE --> CDB
+    SALES --> SDB
 ```
 
-`status` pode ser `PAID` ou `CANCELED`. `event_id` permite que o serviço de vendas faça o
-processamento idempotente.
+| Componente | Porta local | Responsabilidade |
+|---|---:|---|
+| Vehicle Core Service | `8000` | Usuários, JWT, cadastro canônico e webhook |
+| Vehicle Sales Service | `8001` | Catálogo, reserva, compra e histórico de vendas |
+| Core MySQL | Interna | Usuários e veículos canônicos |
+| Sales MySQL | Interna | Projeções, compras e eventos de pagamento |
 
-### Integração entre serviços
+### Separação dos dados
 
-Todas as chamadas internas usam o header `X-Service-Token`.
+Cada microsserviço possui sua própria instância MySQL e não acessa diretamente o banco do outro. A integração acontece exclusivamente por HTTP com o header `X-Service-Token`.
 
-Core para sales:
+O Core não expõe uma listagem geral de veículos. As listas de disponíveis e vendidos são responsabilidade exclusiva do Sales, conforme a separação de domínios do desafio.
 
-- `PUT /internal/v1/vehicles/{vehicle_id}` com
-  `{brand, model, year, color, price, status, source_version}`.
-- `POST /internal/v1/payments` com
-  `{event_id, payment_code, status, occurred_at}`.
+## 🔁 Fluxos principais
 
-Sales para core:
+### Cadastro e autenticação
 
-- `PUT /internal/v1/vehicles/{vehicle_id}/status` com `{status}`.
+```mermaid
+sequenceDiagram
+    participant C as Cliente
+    participant CORE as Core API
+    participant DB as Core MySQL
 
-O cadastro ou a edição permanecem gravados se o sales estiver indisponível; nesse caso o core
-responde com `sync_status=FAILED`. O endpoint de retry retorna `503` enquanto o downstream
-continuar indisponível. Erros seguem o envelope:
-
-```json
-{
-  "error": {
-    "code": "SALES_SERVICE_UNAVAILABLE",
-    "message": "O serviço de vendas está indisponível"
-  }
-}
+    C->>CORE: POST /api/v1/auth/register
+    CORE->>DB: Salva usuário e hash Argon2id
+    CORE-->>C: HTTP 201
+    C->>CORE: POST /api/v1/auth/login
+    CORE->>DB: Valida credenciais
+    CORE-->>C: JWT assinado
 ```
 
-## Variáveis de ambiente
+### Cadastro e sincronização do veículo
 
-Copie `.env.example` para `.env` e substitua todos os segredos. Os valores de desenvolvimento
-são recusados quando `APP_ENV` não é `development` nem `test`.
+```mermaid
+sequenceDiagram
+    participant C as Cliente
+    participant CORE as Core API
+    participant CDB as Core MySQL
+    participant SALES as Sales API
+    participant SDB as Sales MySQL
 
-| Variável | Finalidade |
-| --- | --- |
-| `DATABASE_URL` | URL SQLAlchemy, normalmente `mysql+aiomysql://...`. |
-| `JWT_SECRET` | Assinatura dos tokens JWT. |
-| `JWT_ALGORITHM` | Algoritmo JWT; padrão `HS256`. |
-| `JWT_EXPIRE_MINUTES` | Validade do access token. |
-| `SALES_SERVICE_URL` | URL base do serviço de vendas. |
-| `SALES_SERVICE_TIMEOUT_SECONDS` | Timeout das integrações HTTP. |
-| `SERVICE_TOKEN` | Segredo compartilhado entre core e sales. |
-| `WEBHOOK_SECRET` | Segredo compartilhado com o processador de pagamentos. |
+    C->>CORE: POST /api/v1/vehicles + JWT
+    CORE->>CDB: Persiste veículo canônico
+    CORE->>SALES: PUT /internal/v1/vehicles/{id}
+    SALES->>SDB: Cria ou atualiza projeção
+    SALES-->>CORE: Projeção sincronizada
+    CORE-->>C: Veículo + sync_status
+```
 
-## Execução local
+### Confirmação do pagamento
 
-Requisitos: Python 3.12 e MySQL 8.4 disponível.
+```mermaid
+sequenceDiagram
+    participant P as Provedor de pagamento
+    participant CORE as Core API
+    participant SALES as Sales API
+    participant CDB as Core MySQL
+
+    P->>CORE: POST /api/v1/payments/webhook
+    CORE->>SALES: POST /internal/v1/payments
+    SALES->>SALES: Confirma pagamento de forma idempotente
+    SALES->>CORE: PUT /internal/v1/vehicles/{id}/status
+    CORE->>CDB: Atualiza status para SOLD
+    CORE-->>P: Pagamento processado
+```
+
+## 🗄️ Persistência de dados
+
+O Core utiliza **MySQL 8.4**, SQLAlchemy 2 assíncrono e Alembic.
+
+### `users`
+
+- identificador UUID;
+- nome completo;
+- e-mail único;
+- senha armazenada somente como hash Argon2id;
+- indicador de usuário ativo;
+- datas de criação e atualização.
+
+### `vehicles`
+
+- marca, modelo, ano, cor e preço;
+- status `AVAILABLE`, `RESERVED` ou `SOLD`;
+- estado de sincronização `PENDING`, `SYNCED` ou `FAILED`;
+- `source_version` para controle de versões;
+- usuário responsável pelo cadastro;
+- datas de criação e atualização.
+
+As migrations são executadas com Alembic antes da inicialização das APIs no Docker Compose.
+
+## 🔐 Segurança e regras de negócio
+
+- senhas protegidas com Argon2id;
+- autenticação stateless com JWT;
+- expiração configurável do token;
+- APIs internas protegidas por `X-Service-Token`;
+- webhook protegido por `X-Webhook-Secret`;
+- comparação segura dos segredos;
+- validação de entrada com Pydantic;
+- preço positivo e ano dentro dos limites aceitos;
+- controle de concorrência no serviço de vendas;
+- segredos fornecidos por variáveis de ambiente;
+- `.env` excluído do versionamento;
+- containers executados como usuário não-root.
+
+## 🚀 Tecnologias utilizadas
+
+- Python 3.12;
+- FastAPI;
+- SQLAlchemy 2 assíncrono;
+- MySQL 8.4;
+- Alembic;
+- Pydantic v2;
+- JWT com PyJWT;
+- Argon2;
+- HTTPX;
+- Docker e Docker Compose;
+- Kubernetes e Kind;
+- Terraform;
+- Pytest e Ruff;
+- GitHub Actions;
+- GitHub Container Registry.
+
+## 📋 Pré-requisitos
+
+Para executar a plataforma completa:
+
+- Docker Desktop;
+- Docker Compose v2;
+- Git.
+
+O Python local é opcional quando a execução é feita com Docker.
+
+## 🛠️ Execução local da plataforma
+
+### 1. Clonar os dois repositórios como diretórios irmãos
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip ".[dev]"
-cp .env.example .env
-alembic upgrade head
-uvicorn app.main:app --reload --port 8000
+git clone https://github.com/Hackaton-Fiap-Matheus-Pereira/vehicle-core-service.git
+git clone https://github.com/Hackaton-Fiap-Matheus-Pereira/vehicle-sales-service.git
+cd vehicle-core-service
 ```
 
-No PowerShell, ative o ambiente com `.venv\Scripts\Activate.ps1` e copie o arquivo com
-`Copy-Item .env.example .env`. A documentação OpenAPI ficará em `http://localhost:8000/docs`.
+O `docker-compose.yml` do Core utiliza o diretório irmão `../vehicle-sales-service`.
 
-Um MySQL isolado pode ser iniciado para desenvolvimento com:
+### 2. Configurar o ambiente
 
-```bash
-docker run --name vehicle-core-mysql \
-  -e MYSQL_DATABASE=vehicle_core \
-  -e MYSQL_USER=vehicle_core \
-  -e MYSQL_PASSWORD=vehicle_core \
-  -e MYSQL_ROOT_PASSWORD=root-local-only \
-  -p 3306:3306 -d mysql:8.4
-```
-
-Se executar a API fora de uma rede Docker, ajuste o host de `DATABASE_URL` para `localhost`.
-
-## Testes e qualidade
-
-Os testes usam SQLite assíncrono em memória, HTTPX com `ASGITransport` e doubles das
-integrações externas. Assim, não dependem de MySQL ou do sales para executar.
-
-```bash
-ruff check .
-pytest
-```
-
-O `pytest` falha se a cobertura total ficar abaixo de 80%.
-
-## Docker
-
-```bash
-docker build -t vehicle-core-service:local .
-docker run --rm --env-file .env -p 8000:8000 vehicle-core-service:local
-```
-
-A imagem executa como usuário não-root. O entrypoint aplica `alembic upgrade head` antes de
-iniciar o Uvicorn; portanto o banco precisa estar acessível.
-
-Para subir a plataforma completa, mantenha `vehicle-core-service` e `vehicle-sales-service`
-como diretórios irmãos e execute neste repositório:
+Linux ou macOS:
 
 ```bash
 cp compose.env.example .env
-# substitua os valores CHANGE_ME
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item compose.env.example .env
+```
+
+Substitua todos os valores `CHANGE_ME` do `.env`. O arquivo contém as credenciais dos dois bancos e os segredos de integração.
+
+### 3. Subir a plataforma
+
+```bash
 docker compose up --build --wait
 ```
 
-O Compose inicia duas APIs e duas instâncias MySQL 8.4 segregadas. Kind, Kubernetes e
-Terraform estão no diretório `infra/` e são opcionais para o desenvolvimento local.
+### 4. Verificar os containers
 
-## CI/CD
+```bash
+docker compose ps -a
+```
 
-O workflow `.github/workflows/ci-cd.yml` executa Ruff e os testes em Pull Requests e pushes na
-`main`. Após um merge na `main`, ele:
+Resultado esperado:
 
-1. constrói a imagem;
-2. publica as tags do commit e `latest` no GitHub Container Registry;
-3. executa `alembic upgrade head` em um Job temporário usando os mesmos ConfigMap e Secret do
-   serviço;
-4. atualiza o container `api` do `Deployment/vehicle-core-service` com `kubectl`;
-5. aguarda o rollout.
+- `core-db` e `sales-db` saudáveis;
+- `core-migrations` e `sales-migrations` finalizadas com código `0`;
+- `vehicle-core-service` e `vehicle-sales-service` saudáveis.
 
-Para habilitar o deploy, configure a variável de repositório `ENABLE_K8S_DEPLOY=true` e o
-secret `KUBE_CONFIG_B64`, contendo o kubeconfig em Base64. `KUBE_NAMESPACE` é opcional e
-assume `vehicle-core`. Sem essa variável, CI, testes e publicação no GHCR continuam funcionando
-e apenas o job de deploy é ignorado.
+### 5. Encerrar sem apagar os dados
 
-Na distribuição completa, este repositório também recebe `docker-compose.yml`, `infra/`,
-`docs/` e `scripts/`, que concentram Compose, Kind, Kubernetes, Terraform e o roteiro E2E.
-O código de vendas continua em repositório separado, como exige o enunciado.
+```bash
+docker compose down
+```
+
+> Use `docker compose down -v` somente quando desejar apagar permanentemente os volumes e todos os dados locais.
+
+## 🌐 URLs da aplicação
+
+| Serviço | URL |
+|---|---|
+| Core Swagger | http://localhost:8000/docs |
+| Core OpenAPI | http://localhost:8000/openapi.json |
+| Core Liveness | http://localhost:8000/health/live |
+| Core Readiness | http://localhost:8000/health/ready |
+| Sales Swagger | http://localhost:8001/docs |
+| Sales OpenAPI | http://localhost:8001/openapi.json |
+| Sales Liveness | http://localhost:8001/health/live |
+| Sales Readiness | http://localhost:8001/health/ready |
+
+## 📚 Endpoints do Core
+
+### API pública
+
+| Método | Endpoint | Proteção | Descrição |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/register` | Pública | Cadastra um usuário |
+| `POST` | `/api/v1/auth/login` | Pública | Autentica e retorna um JWT |
+| `POST` | `/api/v1/vehicles` | JWT | Cadastra e sincroniza um veículo |
+| `GET` | `/api/v1/vehicles/{vehicle_id}` | JWT | Consulta um veículo canônico |
+| `PATCH` | `/api/v1/vehicles/{vehicle_id}` | JWT | Edita os dados do veículo |
+| `POST` | `/api/v1/vehicles/{vehicle_id}/sync/retry` | JWT | Repete uma sincronização pendente ou falha |
+| `POST` | `/api/v1/payments/webhook` | `X-Webhook-Secret` | Recebe a decisão do pagamento |
+| `GET` | `/health/live` | Pública | Verifica o processo |
+| `GET` | `/health/ready` | Pública | Verifica o banco |
+
+### API interna
+
+| Método | Endpoint | Proteção | Descrição |
+|---|---|---|---|
+| `PUT` | `/internal/v1/vehicles/{vehicle_id}/status` | `X-Service-Token` | Recebe do Sales uma mudança de status |
+
+## 🧪 Demonstração ponta a ponta
+
+Com os containers saudáveis, execute:
+
+```powershell
+.\scripts\e2e-demo.ps1
+```
+
+O script valida automaticamente:
+
+1. readiness das duas APIs;
+2. cadastro do usuário;
+3. login sem expor o JWT;
+4. cadastro e sincronização do veículo;
+5. listagem dos disponíveis por preço crescente;
+6. criação idempotente da compra;
+7. confirmação pelo webhook;
+8. presença do veículo nos vendidos e remoção dos disponíveis.
+
+Resultado esperado:
+
+```text
+Fluxo ponta a ponta concluído com sucesso.
+```
+
+## 🧪 Testes automatizados
+
+```bash
+python -m venv .venv
+python -m pip install --upgrade pip "-e" ".[dev]"
+ruff check .
+ruff format --check .
+pytest
+```
+
+Os testes usam SQLite assíncrono em memória e doubles das integrações externas. A execução falha se a cobertura total ficar abaixo de 80%.
+
+## 🔄 Pipeline CI/CD
+
+O workflow `.github/workflows/ci-cd.yml` é executado em Pull Requests e pushes na `main`.
+
+```mermaid
+flowchart LR
+    PR[Push ou Pull Request] --> Q[Ruff + Pytest + cobertura]
+    Q -->|Push na main| B[Build Docker]
+    B --> P[Publicação no GHCR]
+    P -->|Deploy habilitado| M[Job de migration]
+    M --> D[Rollout Kubernetes]
+```
+
+### Pull Request
+
+- configura Python 3.12;
+- instala as dependências;
+- executa Ruff;
+- executa Pytest com cobertura mínima de 80%.
+
+### Push ou merge na `main`
+
+- constrói a imagem Docker;
+- publica as tags `latest` e SHA do commit no GHCR;
+- utiliza o `GITHUB_TOKEN` fornecido automaticamente pelo GitHub.
+
+Imagem publicada:
+
+```text
+ghcr.io/hackaton-fiap-matheus-pereira/vehicle-core-service
+```
+
+### Deploy Kubernetes opcional
+
+O deploy é executado quando o repositório possui:
+
+- variável `ENABLE_K8S_DEPLOY=true`;
+- secret `KUBE_CONFIG_B64`;
+- variável opcional `KUBE_NAMESPACE`, com padrão `vehicle-core`.
+
+Sem essas configurações, qualidade, testes, build e publicação no GHCR continuam funcionando; somente o job de deploy fica ignorado.
+
+## ☸️ Kubernetes e Kind
+
+A infraestrutura completa está em `infra/` e inclui:
+
+- namespaces separados;
+- dois StatefulSets MySQL com volumes persistentes;
+- Deployments das APIs;
+- Jobs Alembic;
+- Services internos;
+- probes de liveness e readiness;
+- NetworkPolicies entre os domínios;
+- HPA para o Sales;
+- configuração de cluster Kind.
+
+Renderização local dos manifests:
+
+```bash
+kubectl kustomize infra/kubernetes
+```
+
+## 🏭 Terraform
+
+A pasta `infra/terraform/` declara os recursos Kubernetes da solução como código.
+
+```bash
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars
+terraform init
+terraform plan
+terraform apply
+```
+
+O arquivo `terraform.tfvars` contém valores locais e não deve ser enviado ao GitHub.
+
+## 📊 Logs e diagnóstico
+
+```bash
+docker compose logs -f
+docker compose logs -f vehicle-core-service
+docker compose logs -f vehicle-sales-service
+docker compose logs core-migrations sales-migrations
+```
+
+Estado dos recursos Kubernetes:
+
+```bash
+kubectl get pods,deploy,sts,svc,pvc,hpa -A
+```
+
+## ⚠️ Limitações do MVP
+
+- não existe interface front-end;
+- o ambiente local utiliza HTTP sem TLS;
+- o JWT utiliza segredo simétrico compartilhado;
+- não há recuperação de senha ou confirmação de e-mail;
+- a integração entre os serviços é síncrona por HTTP;
+- não há observabilidade avançada com métricas e traces;
+- o deploy permanente exige um cluster acessível ao GitHub Actions.
+
+## 🔮 Possíveis evoluções
+
+- JWT assimétrico com RS256 e JWKS;
+- mensageria para sincronização assíncrona;
+- padrão outbox para eventos de integração;
+- rotação e gerenciamento externo de secrets;
+- rate limiting;
+- OpenTelemetry, Prometheus e Grafana;
+- ingress controller e HTTPS;
+- testes de carga e concorrência;
+- interface web para compradores e administradores.
+
+## 👥 Organização do repositório
+
+```text
+vehicle-core-service/
+├── app/                       # API, domínio, segurança e integrações
+├── alembic/                   # Migrations do banco Core
+├── tests/                     # Testes automatizados
+├── scripts/                   # Demonstração ponta a ponta
+├── docs/                      # Arquitetura, fluxo e roteiro do vídeo
+├── infra/
+│   ├── kind/                  # Configuração do cluster local
+│   ├── kubernetes/            # Manifests e Kustomize
+│   └── terraform/             # Infraestrutura como código
+├── .github/workflows/         # Pipeline CI/CD
+├── Dockerfile
+├── docker-compose.yml         # Plataforma completa
+├── compose.env.example
+├── pyproject.toml
+├── alembic.ini
+└── README.md
+```
+
+## ✅ Checklist do desafio
+
+### Funcionalidades
+
+- [x] cadastro e autenticação com JWT;
+- [x] senhas protegidas com Argon2id;
+- [x] cadastro, consulta e edição de veículos;
+- [x] sincronização com o microsserviço de vendas;
+- [x] compra com CPF no Sales;
+- [x] pagamento processado por webhook;
+- [x] listagens ordenadas por preço no Sales;
+- [x] proteção contra compra duplicada;
+- [x] bancos independentes por domínio.
+
+### Arquitetura e infraestrutura
+
+- [x] duas APIs FastAPI independentes;
+- [x] SQLAlchemy 2 assíncrono;
+- [x] MySQL 8.4 e Alembic;
+- [x] Docker e Docker Compose;
+- [x] Kubernetes, Kind e Terraform;
+- [x] imagens no GHCR;
+- [x] pipeline de deploy Kubernetes configurável.
+
+### Qualidade
+
+- [x] testes automatizados;
+- [x] cobertura mínima de 80%;
+- [x] lint e formatação com Ruff;
+- [x] fluxo ponta a ponta automatizado;
+- [x] GitHub Actions em Pull Requests;
+- [x] Swagger e OpenAPI.
+
+## 📌 Considerações finais
+
+O Vehicle Core Service concentra identidade, autenticação, cadastro canônico e entrada dos eventos externos de pagamento. A separação do Sales em outro serviço e banco reduz o acoplamento, mantém responsabilidades claras e permite a evolução independente dos domínios.
